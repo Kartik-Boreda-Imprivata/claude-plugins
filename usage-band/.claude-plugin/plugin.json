@@ -1,0 +1,9 @@
+{
+  "name": "usage-band",
+  "version": "0.1.0",
+  "description": "Prompt-cache countdown and rewrite cost, 5h/7d limits, tokens and cost above the prompt, plus a /handoff that writes HANDOFF.md for the next session",
+  "author": {
+    "name": "Kartik Boreda"
+  },
+  "types": "./types/index.d.ts"
+}
