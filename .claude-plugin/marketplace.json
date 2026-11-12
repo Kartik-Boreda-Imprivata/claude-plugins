@@ -1,0 +1,8 @@
+{
+  "name": "kartik-boreda-mods",
+  "owner": { "name": "Kartik Boreda" },
+  "plugins": [
+    { "name": "phase-cost", "source": "./phase-cost" },
+    { "name": "usage-band", "source": "./usage-band" }
+  ]
+}
