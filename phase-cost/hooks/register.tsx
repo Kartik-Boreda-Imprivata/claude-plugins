@@ -19,9 +19,20 @@ const COLOR: Record<Phase, string> = { Planning: '#5c9ded', Implementation: GREE
 
 const usd = (n: number) => `$${n.toFixed(n < 1 ? 3 : 2)}`
 
+// Atoms die with the process, so the ledger is mirrored into $.store (kept across sessions), one key per session id.
+// ponytail: keys are never pruned (~1 KB each, 4 MiB store cap); delete old ones if the store ever fills.
+const key = async ($: { session: { id: () => Promise<string> } }) => `ledger:${await $.session.id()}`
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'phase-cost', description: 'Show cost and tool calls per work phase' })
+    try {
+      const saved = (await $.store.get(await key($))) as { ledger: Ledger; phase: Phase } | undefined
+      if (saved) {
+        await update($, ledger, () => saved.ledger)
+        await update($, phase, () => saved.phase)
+      }
+    } catch {} // a bad or missing store just starts empty
     void $.ui.open({ id: PANE, title: 'Cost by phase' })
     return next(e)
   })
@@ -54,11 +65,14 @@ export const register: Register = on => {
       }
       return out
     })
+    try {
+      await $.store.set(await key($), { ledger: await read($, ledger), phase: p })
+    } catch {}
     return r
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const l = await read($, ledger)
     const sum = (p: Phase) => Object.values(l[p]).reduce((a, r) => ({ n: a.n + r.n, usd: a.usd + r.usd }), { n: 0, usd: 0 })
     const total = PHASES.reduce((a, p) => ({ n: a.n + sum(p).n, usd: a.usd + sum(p).usd }), { n: 0, usd: 0 })
@@ -126,6 +140,9 @@ export const register: Register = on => {
         })}
         {rule}
         <Text dimColor>{total.n} calls · now: <Text color={COLOR[now]}>{now}</Text> · step cost split across its tools</Text>
+        <Box marginTop={1}>
+          <Button key="close" label="Close" hotkey="c" onPress={() => $.ui.close({ id: PANE })} />
+        </Box>
       </Box>
     )
   })

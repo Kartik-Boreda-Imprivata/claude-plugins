@@ -1,1 +1,1 @@
-{ "name": "phase-cost", "version": "0.1.0", "description": "Pane showing session cost and tool calls per work phase (planning, implementation, validation, PR) and per tool", "types": "./types/index.d.ts" }
+{ "name": "phase-cost", "version": "0.1.2", "description": "Pane showing session cost and tool calls per work phase (planning, implementation, validation, PR) and per tool", "types": "./types/index.d.ts" }
