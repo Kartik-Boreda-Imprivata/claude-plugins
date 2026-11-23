@@ -373,8 +373,14 @@ function buildBand($, e, ctx) {
 
   const isColdAndBig = status.state === 'expired' && (ctxTokens ?? 0) >= BIG_CONTEXT
   const handoffControl = busy
-    ? Text({ dimColor: true, children: ['writing handoff...'] })
-    : Button({ key: 'handoff', label: 'handoff', hotkey: 'h', variant: isColdAndBig ? 'primary' : 'secondary', onPress: () => runHandoff($) })
+    ? Text({ dimColor: true, children: ['...'] })
+    : Button({ key: 'handoff', label: e.surface === 'terminal' ? 'Handoff' : 'H', hotkey: 'h', variant: isColdAndBig ? 'primary' : 'secondary', onPress: () => runHandoff($) })
+  const costControl = Button({ key: 'phase-cost', label: e.surface === 'terminal' ? 'Cost' : 'C', hotkey: 'c', variant: 'secondary', onPress: async () => {
+    // phase-cost is a separate mod; without it the command does not exist and run() would throw
+    const has = (await $.command.list()).some((c) => c.name === 'phase-cost')
+    if (has) await $.command.run({ command: 'phase-cost' })
+    else await $.ui.toast('Install the phase-cost mod to see cost by phase')
+  } })
 
   const rows = [
     Box({
@@ -382,7 +388,10 @@ function buildBand($, e, ctx) {
       justifyContent: 'space-between',
       flexWrap: 'wrap',
       columnGap: 2,
-      children: [Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 1, children: withSeps }), handoffControl],
+      children: [
+        Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 1, children: withSeps }),
+        Box({ flexDirection: 'row', columnGap: 1, children: [handoffControl, costControl] }),
+      ],
     }),
   ]
 
