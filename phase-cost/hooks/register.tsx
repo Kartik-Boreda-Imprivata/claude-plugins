@@ -1,12 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Ledger, Phase } from '../types'
-import { PHASES, stepPhase } from './classify'
+import type { Ledger, Models, Phase } from '../types'
+import { PHASES, label, stepPhase } from './classify'
 
 const PANE = 'phase-cost'
-const empty = (): Ledger => ({ Planning: {}, Implementation: {}, Validation: {}, PR: {} })
+const empty = (): Ledger & Models => ({ Planning: {}, Implementation: {}, Validation: {}, PR: {} })
 const ledger = atom({ plugin: 'phase-cost', key: 'ledger' } as const, empty())
+const models = atom({ plugin: 'phase-cost', key: 'models' } as const, empty() as Models)
 const phase = atom({ plugin: 'phase-cost', key: 'phase' } as const, 'Planning' as Phase)
 const lastUsd = atom({ plugin: 'phase-cost', key: 'lastUsd' } as const, null as number | null)
 
@@ -17,22 +18,41 @@ const RED = '#e53935'
 const TRACK = '#555555'
 const COLOR: Record<Phase, string> = { Planning: '#5c9ded', Implementation: GREEN, Validation: AMBER, PR: '#ab47bc' }
 
+const short = (m: string) => m.replace(/^(us\.)?(anthropic\.)?claude-/, '').replace(/-\d{8}.*$/, '').replace(/-v\d.*$/, '')
 const usd = (n: number) => `$${n.toFixed(n < 1 ? 3 : 2)}`
 
 // Atoms die with the process, so the ledger is mirrored into $.store (kept across sessions), one key per session id.
 // ponytail: keys are never pruned (~1 KB each, 4 MiB store cap); delete old ones if the store ever fills.
-const key = async ($: { session: { id: () => Promise<string> } }) => `ledger:${await $.session.id()}`
+type Saved = { ledger: Ledger; models?: Models; phase: Phase }
+type Env = { session: { id: () => Promise<string> }; store: { get: (k: string) => Promise<unknown> } }
+const key = (id: string) => `ledger:${id}`
+const fetchSaved = async ($: Env, id: string) => {
+  try {
+    return (await $.store.get(key(id))) as Saved | undefined
+  } catch {
+    return undefined // a bad or missing store just starts empty
+  }
+}
+// Which session the atoms hold. /resume inside a running process switches sessions without a new session.start,
+// and a resumed process may start under another id first, so every writer calls this and reloads when the id moved.
+const loaded = atom({ plugin: 'phase-cost', key: 'loaded' } as const, null as string | null)
+const sync = async ($: Parameters<typeof update>[0] & Env) => {
+  const id = await $.session.id()
+  if ((await read($, loaded)) === id) return
+  const s = await fetchSaved($, id)
+  await update($, ledger, () => s?.ledger ?? empty())
+  await update($, models, () => s?.models ?? empty())
+  await update($, phase, () => s?.phase ?? 'Planning')
+  await update($, lastUsd, () => null) // take a fresh cost baseline in this session
+  await update($, loaded, () => id)
+}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'phase-cost', description: 'Show cost and tool calls per work phase' })
     try {
-      const saved = (await $.store.get(await key($))) as { ledger: Ledger; phase: Phase } | undefined
-      if (saved) {
-        await update($, ledger, () => saved.ledger)
-        await update($, phase, () => saved.phase)
-      }
-    } catch {} // a bad or missing store just starts empty
+      await sync($)
+    } catch {}
     void $.ui.open({ id: PANE, title: 'Cost by phase' })
     return next(e)
   })
@@ -43,6 +63,9 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    try {
+      await sync($)
+    } catch {}
     // Baseline once; afterwards every dollar since the last step (subagents included) lands on the next one, so the total reconciles with /cost.
     if ((await read($, lastUsd)) === null) {
       const base = (await $.session.usage()).cost?.usd ?? 0
@@ -56,7 +79,7 @@ export const register: Register = on => {
 
     const p = stepPhase(r.toolUses, await read($, phase))
     await update($, phase, () => p)
-    const names = r.toolUses.length ? r.toolUses.map(u => u.name) : ['(reply)']
+    const names = r.toolUses.length ? r.toolUses.map(u => label(u.name, u.input)) : ['(reply)']
     await update($, ledger, l => {
       const out = { ...l, [p]: { ...l[p] } }
       for (const n of names) {
@@ -65,19 +88,30 @@ export const register: Register = on => {
       }
       return out
     })
+    // Step cost (subagent spend since the last step included) goes to the model that answered this step.
+    const m = r.usage?.model ?? 'unknown'
+    await update($, models, l => {
+      const row = l[p][m] ?? { n: 0, usd: 0 }
+      return { ...l, [p]: { ...l[p], [m]: { n: row.n + 1, usd: row.usd + delta } } }
+    })
     try {
-      await $.store.set(await key($), { ledger: await read($, ledger), phase: p })
+      await $.store.set(key(await $.session.id()), { ledger: await read($, ledger), models: await read($, models), phase: p })
     } catch {}
     return r
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const l = await read($, ledger)
+    // Draw the current session's numbers even before a step has synced the atoms to it (e.g. just after /resume).
+    const id = await $.session.id()
+    const stale = (await read($, loaded)) !== id
+    const s = stale ? await fetchSaved($, id) : undefined
+    const l = stale ? s?.ledger ?? empty() : await read($, ledger)
+    const ml = stale ? s?.models ?? empty() : await read($, models)
     const sum = (p: Phase) => Object.values(l[p]).reduce((a, r) => ({ n: a.n + r.n, usd: a.usd + r.usd }), { n: 0, usd: 0 })
     const total = PHASES.reduce((a, p) => ({ n: a.n + sum(p).n, usd: a.usd + sum(p).usd }), { n: 0, usd: 0 })
     const max = Math.max(...PHASES.map(p => sum(p).usd), 0.000001)
-    const now = await read($, phase)
+    const now = stale ? s?.phase ?? 'Planning' : await read($, phase)
     const biggest = PHASES.reduce((a, p) => (sum(p).usd > sum(a).usd ? p : a), PHASES[0])
 
     // No character padding and no fixed-width rules: columns are Boxes with a set width, the bars and the
@@ -93,6 +127,24 @@ export const register: Register = on => {
         {share < 1 && <Box flexGrow={1 - share} backgroundColor={TRACK} />}
       </Box>
     )
+
+    // One indented detail line: name, count, cost, share of its phase. Model rows are tinted so they read apart from tools.
+    const row = (name: string, count: string, cost: string, pct: number, isModel = false) => (
+      <Box flexDirection="row" columnGap={2} paddingLeft={4}>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text dimColor={!isModel} color={isModel ? '#5c9ded' : undefined} wrap="truncate">{isModel ? '◆ ' : ''}{name}</Text>
+        </Box>
+        <Box width={9} flexShrink={0} justifyContent="flex-end"><Text dimColor>{count}</Text></Box>
+        <Box width={8} flexShrink={0} justifyContent="flex-end"><Text dimColor>{cost}</Text></Box>
+        <Box width={5} flexShrink={0} justifyContent="flex-end"><Text dimColor>{pct}%</Text></Box>
+      </Box>
+    )
+    const byModel: Record<string, { n: number; usd: number }> = {}
+    for (const p of PHASES) for (const [m, r] of Object.entries(ml[p])) {
+      const t = (byModel[m] ??= { n: 0, usd: 0 })
+      t.n += r.n
+      t.usd += r.usd
+    }
 
     return (
       <Box flexDirection="column">
@@ -135,9 +187,14 @@ export const register: Register = on => {
                 </Text>
                 {p === biggest && s.usd > 0 && <Text color={AMBER}>▲ top</Text>}
               </Box>
+              {Object.entries(l[p]).sort((a, b) => b[1].usd - a[1].usd).slice(0, 6).map(([name, r]) => row(name, `${r.n}×`, usd(r.usd), s.usd > 0 ? Math.round((r.usd / s.usd) * 100) : 0))}
+              {Object.entries(ml[p]).sort((a, b) => b[1].usd - a[1].usd).map(([m, r]) => row(short(m), `${r.n} steps`, usd(r.usd), s.usd > 0 ? Math.round((r.usd / s.usd) * 100) : 0, true))}
             </Box>
           )
         })}
+        {rule}
+        <Text bold>Model usage</Text>
+        {Object.entries(byModel).sort((a, b) => b[1].usd - a[1].usd).map(([m, r]) => row(short(m), `${r.n} steps`, usd(r.usd), total.usd > 0 ? Math.round((r.usd / total.usd) * 100) : 0, true))}
         {rule}
         <Text dimColor>{total.n} calls · now: <Text color={COLOR[now]}>{now}</Text> · step cost split across its tools</Text>
         <Box marginTop={1}>

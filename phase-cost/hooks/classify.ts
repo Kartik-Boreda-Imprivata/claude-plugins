@@ -28,3 +28,14 @@ export function stepPhase(uses: readonly { name: string; input: unknown }[], cur
   const hits = uses.map(u => classify(u.name, u.input)).filter((p): p is Phase => !!p)
   return hits.length ? hits.sort((a, b) => PHASES.indexOf(b) - PHASES.indexOf(a))[0] : current
 }
+
+// Finer row label: Bash by its command word, Skill by its skill name; everything else by tool name.
+export function label(name: string, input: unknown): string {
+  const i = (input ?? {}) as { skill?: string; command?: string }
+  if (name === 'Skill' && i.skill) return `Skill:${i.skill}`
+  if (name === 'Bash') {
+    const w = (i.command ?? '').trim().split(/\s+/).find(t => !/^(cd|export|\w+=.*)$/.test(t) && t !== '&&' && !t.startsWith('/'))
+    if (w) return `Bash:${w.slice(0, 20)}`
+  }
+  return name
+}
